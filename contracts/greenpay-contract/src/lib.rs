@@ -481,6 +481,7 @@ impl GreenPayContract {
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env, String};
+    use soroban_sdk::token::StellarAssetClient;
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 
@@ -568,6 +569,89 @@ mod tests {
     fn extend_ttl(env: &Env, cid: &soroban_sdk::Address) {
         env.as_contract(cid, || {
             env.storage().instance().extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+        });
+    }
+
+    #[test]
+    fn test_upgrade_preserves_donation_state_and_storage_keys() {
+        let (env, cid, client_v1, _admin, pid) = setup();
+        let donor       = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token       = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let amount       = 25 * STROOP;
+        let expected_co2 = 25 * 100i128;
+
+        token_client.mint(&donor, &amount);
+        client_v1.donate(&token, &donor, &pid, &amount, &42u32);
+
+        let project_before = client_v1.get_project(&pid);
+        assert_eq!(project_before.total_raised, amount);
+        assert_eq!(project_before.donor_count, 1);
+        assert_eq!(client_v1.get_donation_count(), 1);
+        assert_eq!(client_v1.get_global_total(), amount);
+        assert_eq!(client_v1.get_global_co2(), expected_co2);
+
+        // The test host replaces the executable at the same contract address,
+        // modeling a v2 deployment with the same storage key definitions.
+        let v2_cid = env.register_contract(Some(&cid), GreenPayContract);
+        assert_eq!(v2_cid, cid);
+
+        let client_v2 = GreenPayContractClient::new(&env, &cid);
+        let project_after = client_v2.get_project(&pid);
+        assert_eq!(project_after.id,            project_before.id);
+        assert_eq!(project_after.name,          project_before.name);
+        assert_eq!(project_after.wallet,        project_before.wallet);
+        assert_eq!(project_after.co2_per_xlm,   project_before.co2_per_xlm);
+        assert_eq!(project_after.total_raised,  amount);
+        assert_eq!(project_after.donor_count,   1);
+        assert!(project_after.active);
+        assert_eq!(project_after.registered_at, project_before.registered_at);
+
+        let donor_stats = client_v2.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated,    amount);
+        assert_eq!(donor_stats.donation_count,   1);
+        assert_eq!(donor_stats.badge,            BadgeTier::Seedling);
+        assert_eq!(donor_stats.co2_offset_grams, expected_co2);
+        assert!(client_v2.has_nft(&donor, &BadgeTier::Seedling));
+        assert_eq!(client_v2.get_project_count(),   1);
+        assert_eq!(client_v2.get_donation_count(),  1);
+        assert_eq!(client_v2.get_global_total(),    amount);
+        assert_eq!(client_v2.get_global_co2(),      expected_co2);
+
+        env.as_contract(&cid, || {
+            let stored_project: Project = env.storage().instance()
+                .get(&DataKey::Project(pid.clone()))
+                .expect("project key must remain readable after upgrade");
+            assert_eq!(stored_project.total_raised, amount);
+            assert_eq!(stored_project.donor_count,  1);
+
+            let stored_stats: DonorStats = env.storage().instance()
+                .get(&DataKey::DonorStats(donor.clone()))
+                .expect("donor stats key must remain readable after upgrade");
+            assert_eq!(stored_stats.total_donated,    amount);
+            assert_eq!(stored_stats.donation_count,   1);
+            assert_eq!(stored_stats.badge,            BadgeTier::Seedling);
+            assert_eq!(stored_stats.co2_offset_grams, expected_co2);
+
+            let has_donated: bool = env.storage().instance()
+                .get(&DataKey::HasDonated(pid.clone(), donor.clone()))
+                .expect("unique donor key must remain readable after upgrade");
+            assert!(has_donated);
+
+            let donation_count: u32 = env.storage().instance()
+                .get(&DataKey::DonationCount)
+                .expect("donation count key must remain readable after upgrade");
+            let global_total: i128 = env.storage().instance()
+                .get(&DataKey::GlobalTotalRaised)
+                .expect("global total key must remain readable after upgrade");
+            let global_co2: i128 = env.storage().instance()
+                .get(&DataKey::GlobalCO2OffsetGrams)
+                .expect("global CO2 key must remain readable after upgrade");
+
+            assert_eq!(donation_count, 1);
+            assert_eq!(global_total,   amount);
+            assert_eq!(global_co2,     expected_co2);
         });
     }
 
