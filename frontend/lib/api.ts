@@ -17,7 +17,78 @@ const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000",
   headers: { "Content-Type": "application/json" },
   timeout: 10000,
+  withCredentials: true,
 });
+
+let csrfToken: string | null = null;
+
+async function refreshCsrfToken() {
+  const { data } = await api.get<{ success: boolean; csrfToken: string }>(
+    "/api/csrf-token",
+  );
+  csrfToken = data.csrfToken;
+  return csrfToken;
+}
+
+api.interceptors.request.use(async (config) => {
+  const method = config.method?.toUpperCase();
+  const isMutating = method && ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+
+  if (isMutating) {
+    if (!csrfToken) {
+      await refreshCsrfToken();
+    }
+
+    if (csrfToken) {
+      config.headers = {
+        ...config.headers,
+        "X-CSRF-Token": csrfToken,
+      };
+    }
+  }
+
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response?.status === 403 && !error.config.__csrfRetry) {
+      error.config.__csrfRetry = true;
+      csrfToken = null;
+      await refreshCsrfToken();
+      if (csrfToken) {
+        error.config.headers = {
+          ...error.config.headers,
+          "X-CSRF-Token": csrfToken,
+        };
+        return api.request(error.config);
+      }
+    }
+
+    return Promise.reject(error);
+  },
+);
+
+export async function csrfFetch(input: RequestInfo, init: RequestInit = {}) {
+  const method = init.method?.toUpperCase() || "GET";
+  const needsToken = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+
+  if (needsToken) {
+    if (!csrfToken) {
+      await refreshCsrfToken();
+    }
+
+    init.headers = {
+      ...(init.headers as Record<string, string>),
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken ?? "",
+    };
+    init.credentials = "include";
+  }
+
+  return fetch(input, init);
+}
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 export async function fetchProjects(params?: {
