@@ -161,6 +161,67 @@ export default function ProjectsPage() {
         </div>
       </div>
 
+      {/* Filter chips (mobile-friendly) */}
+      <div className="flex flex-wrap gap-2 mb-6 lg:hidden">
+        <button
+          onClick={() => setFilter("category", "")}
+          className={clsx(
+            "px-3 py-1.5 rounded-full text-sm font-medium border transition-all font-body",
+            !category
+              ? "bg-forest-500 text-white border-forest-500"
+              : "bg-white text-forest-700 border-forest-200 hover:border-forest-400"
+          )}
+        >
+          All
+        </button>
+        {PROJECT_CATEGORIES.map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setFilter("category", cat)}
+            className={clsx(
+              "px-3 py-1.5 rounded-full text-sm font-medium border transition-all font-body flex items-center gap-1.5",
+              category === cat
+                ? "bg-forest-500 text-white border-forest-500"
+                : "bg-white text-forest-700 border-forest-200 hover:border-forest-400"
+            )}
+          >
+            <span>{CATEGORY_ICONS[cat]}</span>
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {/* Active filter summary */}
+      {(category || status !== "active" || verified || search) && (
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="text-xs text-[#8aaa8a] font-body">Active filters:</span>
+          {category && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              {CATEGORY_ICONS[category]} {category}
+              <button onClick={() => setFilter("category", "")} className="ml-1 hover:text-forest-900">✕</button>
+            </span>
+          )}
+          {status !== "active" && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              {status || "All"} status
+              <button onClick={() => setFilter("status", "active")} className="ml-1 hover:text-forest-900">✕</button>
+            </span>
+          )}
+          {verified && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              ✓ Verified
+              <button onClick={() => setFilter("verified", "")} className="ml-1 hover:text-forest-900">✕</button>
+            </span>
+          )}
+          {search && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              🔍 {search}
+              <button onClick={() => { setSearch(""); setFilter("search", ""); }} className="ml-1 hover:text-forest-900">✕</button>
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Search */}
       <div className="relative mb-6" ref={searchRef}>
         <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8aaa8a] z-10">
