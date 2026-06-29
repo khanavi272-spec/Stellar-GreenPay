@@ -1,3 +1,15 @@
+# Test stage — devDependencies for jest in docker-compose.test.yml
+FROM node:20-alpine AS test
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+CMD ["npm", "test"]
+
 # 1. Builder Stage
 FROM node:20-alpine AS builder
 
