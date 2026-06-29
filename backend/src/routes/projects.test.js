@@ -8,6 +8,7 @@ jest.mock("../db/pool", () => ({
 jest.mock("../services/redis", () => ({
   get: jest.fn(),
   set: jest.fn(),
+  deletePattern: jest.fn(),
 }));
 
 jest.mock("../services/stellar", () => ({
@@ -26,6 +27,8 @@ const redis = require("../services/redis");
 const express = require("express");
 const request = require("supertest");
 const projectsRouter = require("./projects");
+
+process.env.ADMIN_API_KEY = "test-admin-key";
 
 function buildApp() {
   const app = express();
@@ -178,5 +181,30 @@ describe("POST /api/projects (admin)", () => {
       .send({ name: "Test" });
 
     expect(res.status).toBe(401);
+  });
+
+  test("rejects requests with an invalid admin key", async () => {
+    const res = await request(app)
+      .patch("/api/projects/proj-1/status")
+      .set("X-Admin-Key", "wrong")
+      .send({ status: "active", adminAddress: "GADMIN" });
+
+    expect(res.status).toBe(401);
+  });
+
+  test("allows status updates with a valid admin key", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] })
+      .mockResolvedValueOnce({ rows: [{ ...MOCK_PROJECT_ROW, status: "paused" }] });
+    redis.deletePattern.mockResolvedValue(0);
+
+    const res = await request(app)
+      .patch("/api/projects/proj-1/status")
+      .set("X-Admin-Key", "test-admin-key")
+      .send({ status: "paused", reason: "maintenance", adminAddress: "GADMIN" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(redis.deletePattern).toHaveBeenCalledWith("projects:list:*");
   });
 });

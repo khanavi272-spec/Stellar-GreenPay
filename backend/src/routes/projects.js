@@ -7,6 +7,7 @@ const router = express.Router();
 const { v4: uuid } = require("uuid");
 const pool = require("../db/pool");
 const { logAdminAction } = require("../services/audit");
+const { adminKeyRequired } = require("../middleware/auth");
 const { mapProjectRow, mapProjectMilestoneRow } = require("../services/store");
 const { getOnChainProject, CONTRACT_ID, server, NETWORK_PASSPHRASE } = require("../services/stellar");
 const { enqueueAISummary } = require("../services/summaryQueue");
@@ -244,7 +245,7 @@ router.get("/:id/verify", async (req, res) => {
   }
 });
 
-router.post("/:id/campaigns", async (req, res, next) => {
+router.post("/:id/campaigns", adminKeyRequired, async (req, res, next) => {
   try {
     const { title, goalXLM, deadline, description } = req.body || {};
     const trimmedTitle = typeof title === "string" ? title.trim() : "";
@@ -320,7 +321,7 @@ router.get("/:id/milestones", async (req, res, next) => {
   }
 });
 
-router.post("/:id/milestones", async (req, res, next) => {
+router.post("/:id/milestones", adminKeyRequired, async (req, res, next) => {
   try {
     const { title, percentage } = req.body;
     if (!title || typeof percentage !== "number") {
@@ -348,7 +349,7 @@ router.post("/:id/milestones", async (req, res, next) => {
   }
 });
 
-router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
+router.post("/:id/milestones/:milestoneId/reach", adminKeyRequired, async (req, res, next) => {
   try {
     const { transactionHash } = req.body;
     const result = await pool.query(
@@ -380,7 +381,7 @@ router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
  * Builds a Soroban transaction to register a project on-chain.
  * Returns the XDR for the admin to sign.
  */
-router.post("/admin/register", async (req, res) => {
+router.post("/admin/register", adminKeyRequired, async (req, res) => {
   try {
     const { projectId, name, wallet, co2PerXLM, adminAddress } = req.body;
     
@@ -417,7 +418,7 @@ router.post("/admin/register", async (req, res) => {
  * POST /api/projects/admin/confirm
  * Verifies a registration transaction and updates the local store.
  */
-router.post("/admin/confirm", async (req, res) => {
+router.post("/admin/confirm", adminKeyRequired, async (req, res) => {
   try {
     const { transactionHash, projectId } = req.body;
     
@@ -517,7 +518,7 @@ router.get("/:id", async (req, res, next) => {
  * Response: { success: true, data: { aiSummary, aiSummaryGeneratedAt,
  *                                    aiSummaryModel, aiSummarySourceHash } }
  */
-router.post("/:id/generate-summary", async (req, res, next) => {
+router.post("/:id/generate-summary", adminKeyRequired, async (req, res, next) => {
   try {
     const { adminAddress } = req.body || {};
     if (!adminAddress || typeof adminAddress !== "string") {
@@ -556,7 +557,7 @@ router.post("/:id/generate-summary", async (req, res, next) => {
   }
 });
 
-router.post("/:id/matching", async (req, res, next) => {
+router.post("/:id/matching", adminKeyRequired, async (req, res, next) => {
   try {
     const { matcherAddress, capXLM, multiplier, expiresAt } = req.body || {};
 
@@ -649,7 +650,7 @@ router.get("/:id/matching", async (req, res, next) => {
  * Approve or reject a project. Body: { status: "active" | "rejected", reason?: string }
  * `adminAddress` must match the project wallet (owner) or be a platform admin.
  */
-router.patch("/:id/status", async (req, res, next) => {
+router.patch("/:id/status", adminKeyRequired, async (req, res, next) => {
   try {
     const { status, reason, adminAddress } = req.body || {};
     const validStatuses = ["active", "rejected", "paused"];
