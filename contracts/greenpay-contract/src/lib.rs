@@ -54,6 +54,7 @@ pub struct Project {
     pub total_raised:  i128,
     pub donor_count:   u32,
     pub active:        bool,
+    pub paused:        bool,
     pub registered_at: u32,
 }
 
@@ -181,7 +182,7 @@ impl GreenPayContract {
         }
         let project = Project {
             id: project_id.clone(), name, wallet, co2_per_xlm,
-            total_raised: 0, donor_count: 0, active: true,
+            total_raised: 0, donor_count: 0, active: true, paused: false,
             registered_at: env.ledger().sequence(),
         };
         env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
@@ -202,6 +203,30 @@ impl GreenPayContract {
         env.storage().instance().set(&DataKey::Project(project_id), &project);
     }
 
+    pub fn pause_project(env: Env, admin: Address, project_id: String) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can pause projects"); }
+        let mut project: Project = env.storage().instance()
+            .get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Cannot pause a deactivated project"); }
+        project.paused = true;
+        env.storage().instance().set(&DataKey::Project(project_id), &project);
+    }
+
+    pub fn resume_project(env: Env, admin: Address, project_id: String) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can resume projects"); }
+        let mut project: Project = env.storage().instance()
+            .get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Cannot resume a deactivated project"); }
+        project.paused = false;
+        env.storage().instance().set(&DataKey::Project(project_id), &project);
+    }
+
     // ─── Donations ────────────────────────────────────────────────────────────
 
     pub fn donate(
@@ -218,6 +243,7 @@ impl GreenPayContract {
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Project is not accepting donations"); }
+        if project.paused { panic!("Project is temporarily paused"); }
 
         // Pre-compute CO2 increment with checked multiplication so an attacker
         // can't trigger a silent wrap via a project with a huge co2_per_xlm.
@@ -504,6 +530,7 @@ impl GreenPayContract {
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Project is not accepting donations"); }
+        if project.paused { panic!("Project is temporarily paused"); }
 
         // Pre-compute CO2 increment using XLM-equivalent
         let xlm_units = xlm_equivalent / STROOP;
@@ -997,5 +1024,90 @@ mod tests {
 
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.votes_for, 1);
+    }
+
+    // ─── Pause / Resume tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_pause_project() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        let project = client.get_project(&pid);
+        assert!(project.active);
+        assert!(project.paused);
+    }
+
+    #[test]
+    fn test_resume_project() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
+        let project = client.get_project(&pid);
+        assert!(project.active);
+        assert!(!project.paused);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is temporarily paused")]
+    fn test_donate_to_paused_project_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(25 * STROOP));
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &42u32);
+    }
+
+    #[test]
+    fn test_donate_after_resume_succeeds() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let amount = 25 * STROOP;
+        token_client.mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can pause projects")]
+    fn test_pause_project_non_admin_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let impostor = Address::generate(&env);
+        client.pause_project(&impostor, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can resume projects")]
+    fn test_resume_project_non_admin_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let impostor = Address::generate(&env);
+        client.resume_project(&impostor, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot pause a deactivated project")]
+    fn test_pause_deactivated_project_fails() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.deactivate_project(&admin, &pid);
+        client.pause_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot resume a deactivated project")]
+    fn test_resume_deactivated_project_fails() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.deactivate_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
     }
 }
