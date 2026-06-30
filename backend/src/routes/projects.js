@@ -7,10 +7,15 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuid } = require("uuid");
 const pool = require("../db/pool");
+const { logAdminAction } = require("../services/audit");
 const { mapProjectRow, mapProjectMilestoneRow } = require("../services/store");
 const { getOnChainProject, CONTRACT_ID, server, NETWORK_PASSPHRASE } = require("../services/stellar");
-const { generateProjectSummary } = require("../services/claude");
+const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
+const redis = require("../services/redis");
+
+const PROJECTS_LIST_CACHE_TTL = 60; // seconds
+const PROJECTS_LIST_CACHE_PREFIX = "projects:list:";
 
 const VALID_STATUSES = ["active", "completed", "paused"];
 const VALID_CATEGORIES = [
@@ -109,7 +114,15 @@ router.get("/featured", async (req, res, next) => {
 
 router.get("/", async (req, res, next) => {
   try {
-    const { category, status, verified, search, limit = 50 } = req.query;
+    const { category, status, verified, search, limit = 20, cursor } = req.query;
+    const pageSize = Math.min(Number.parseInt(limit, 10) || 20, 100);
+
+    const cacheKey = PROJECTS_LIST_CACHE_PREFIX + JSON.stringify({ category, status, verified, search, limit: pageSize, cursor: cursor || null });
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const where = [];
     const values = [];
 
@@ -138,17 +151,89 @@ router.get("/", async (req, res, next) => {
       )`);
     }
 
-    values.push(Math.min(Number.parseInt(limit, 10) || 50, 100));
-    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    if (cursor) {
+      let cursorData;
+      try {
+        cursorData = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+      } catch {
+        return res.status(400).json({ error: "Invalid cursor" });
+      }
+      const { created_at, id } = cursorData;
+      if (!created_at || !id) {
+        return res.status(400).json({ error: "Invalid cursor" });
+      }
+      values.push(created_at, id);
+      const caIdx = values.length - 1;
+      const idIdx = values.length;
+      where.push(`(created_at < $${caIdx} OR (created_at = $${caIdx} AND id < $${idIdx}))`);
+    }
 
+    values.push(pageSize + 1);
+    const limitIdx = values.length;
+
+    let query = "SELECT * FROM projects ";
+    if (where.length) {
+      query += "WHERE " + where.join(" AND ") + " ";
+    }
+    query += `ORDER BY created_at DESC, id DESC LIMIT $${limitIdx}`;
+
+    // All user-controlled values (status, category, search, cursor fields) are
+    // passed as parameterised $N placeholders in `values`. Dynamic WHERE clauses
+    // are built only from whitelisted enum strings, so no injection surface exists.
+    const result = await pool.query(query, values);
+    const rows = result.rows;
+    const hasMore = rows.length > pageSize;
+    const data = rows.slice(0, pageSize).map(mapProjectRow);
+
+    let nextCursor = null;
+    if (hasMore) {
+      const last = rows[pageSize - 1];
+      nextCursor = Buffer.from(JSON.stringify({ created_at: last.created_at, id: last.id })).toString("base64");
+    }
+
+    const responseBody = { success: true, data, next_cursor: nextCursor, has_more: hasMore };
+    await redis.set(cacheKey, responseBody, PROJECTS_LIST_CACHE_TTL);
+
+    res.json(responseBody);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * POST /api/projects
+ * Create a new project. Validates string lengths to prevent database bloat.
+ */
+router.post("/", async (req, res, next) => {
+  try {
+    const { name, description, location, category, wallet_address, goal_xlm = 0, tags = [] } = req.body || {};
+
+    if (!name || typeof name !== "string" || name.trim().length < 3 || name.trim().length > 120) {
+      return res.status(400).json({ error: "name must be between 3 and 120 characters" });
+    }
+    if (!description || typeof description !== "string" || description.trim().length < 10 || description.trim().length > 5000) {
+      return res.status(400).json({ error: "description must be between 10 and 5000 characters" });
+    }
+    if (!location || typeof location !== "string" || location.trim().length < 2 || location.trim().length > 200) {
+      return res.status(400).json({ error: "location must be between 2 and 200 characters" });
+    }
+    if (!category || !VALID_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: `category must be one of: ${VALID_CATEGORIES.join(", ")}` });
+    }
+    if (!wallet_address || typeof wallet_address !== "string") {
+      return res.status(400).json({ error: "wallet_address is required" });
+    }
+
+    const id = uuid();
     const result = await pool.query(
-      `SELECT * FROM projects ${whereClause}
-       ORDER BY created_at DESC
-       LIMIT $${values.length}`,
-      values,
+      `INSERT INTO projects (id, name, description, category, location, wallet_address, goal_xlm, tags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [id, name.trim(), description.trim(), category, location.trim(), wallet_address, goal_xlm, tags],
     );
 
-    res.json({ success: true, data: result.rows.map(mapProjectRow) });
+    await redis.deletePattern(PROJECTS_LIST_CACHE_PREFIX + "*");
+    res.status(201).json({ success: true, data: mapProjectRow(result.rows[0]) });
   } catch (e) {
     next(e);
   }
@@ -237,6 +322,15 @@ router.post("/:id/campaigns", async (req, res, next) => {
       [uuid(), req.params.id, trimmedTitle, trimmedDescription || null, goal.toFixed(7), deadlineDate.toISOString()],
     );
 
+    logAdminAction({
+      actor: req.body?.adminAddress || "unknown",
+      action: "project.campaign.create",
+      targetType: "project_campaign",
+      targetId: result.rows[0].id,
+      metadata: { projectId: req.params.id, title: trimmedTitle, goalXLM: goal, deadline },
+      ipAddress: req.ip,
+    });
+
     res.status(201).json({ success: true, data: mapCampaignRow(result.rows[0]) });
   } catch (e) {
     next(e);
@@ -280,6 +374,16 @@ router.post("/:id/milestones", async (req, res, next) => {
        RETURNING *`,
       [uuid(), req.params.id, title, percentage],
     );
+
+    logAdminAction({
+      actor: req.body?.adminAddress || "unknown",
+      action: "project.milestone.create",
+      targetType: "project_milestone",
+      targetId: result.rows[0].id,
+      metadata: { projectId: req.params.id, title, percentage },
+      ipAddress: req.ip,
+    });
+
     res.status(201).json({ success: true, data: mapProjectMilestoneRow(result.rows[0]) });
   } catch (e) {
     next(e);
@@ -297,6 +401,16 @@ router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
       [transactionHash || null, req.params.milestoneId, req.params.id],
     );
     if (!result.rows[0]) return res.status(404).json({ error: "Milestone not found" });
+
+    logAdminAction({
+      actor: req.body?.adminAddress || "unknown",
+      action: "project.milestone.reach",
+      targetType: "project_milestone",
+      targetId: req.params.milestoneId,
+      metadata: { projectId: req.params.id, transactionHash },
+      ipAddress: req.ip,
+    });
+
     res.json({ success: true, data: mapProjectMilestoneRow(result.rows[0]) });
   } catch (e) {
     next(e);
@@ -318,13 +432,22 @@ router.post("/admin/register", async (req, res) => {
     const contract = new Contract(CONTRACT_ID);
     const sourceAccount = await server.loadAccount(adminAddress);
 
-    const tx = new TransactionBuilder(sourceAccount, { 
-      fee: "1000", 
-      networkPassphrase: NETWORK_PASSPHRASE 
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: "1000",
+      networkPassphrase: NETWORK_PASSPHRASE,
     })
-    .addOperation(contract.call("register_project", adminAddress, projectId, name, wallet, parseInt(co2PerXLM)))
-    .setTimeout(30)
-    .build();
+      .addOperation(contract.call("register_project", adminAddress, projectId, name, wallet, parseInt(co2PerXLM)))
+      .setTimeout(30)
+      .build();
+
+    logAdminAction({
+      actor: adminAddress,
+      action: "project.register",
+      targetType: "project",
+      targetId: projectId,
+      metadata: { name, wallet, co2PerXLM },
+      ipAddress: req.ip,
+    });
 
     res.json({ success: true, xdr: tx.toXDR() });
   } catch (err) {
@@ -353,6 +476,15 @@ router.post("/admin/confirm", async (req, res) => {
       [projectId],
     );
 
+    logAdminAction({
+      actor: "admin",
+      action: "project.confirm",
+      targetType: "project",
+      targetId: projectId,
+      metadata: { transactionHash },
+      ipAddress: req.ip,
+    });
+
     res.json({ success: true, data: result.rows[0] ? mapProjectRow(result.rows[0]) : null });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -363,6 +495,16 @@ router.get("/:id", async (req, res, next) => {
   try {
     const projectResult = await pool.query("SELECT * FROM projects WHERE id = $1", [req.params.id]);
     if (!projectResult.rows[0]) return res.status(404).json({ error: "Project not found" });
+
+    const updatedAt = projectResult.rows[0].updated_at;
+    const etag = `"${crypto.createHash("md5").update(String(updatedAt)).digest("hex")}"`;
+    const lastModified = new Date(updatedAt).toUTCString();
+    res.set("ETag", etag);
+    res.set("Last-Modified", lastModified);
+    if (req.headers["if-none-match"] === etag) {
+      return res.status(304).end();
+    }
+
     const campaigns = await fetchCampaignsForProject(req.params.id);
     const onChainProject = await getOnChainProject(req.params.id);
 
@@ -545,50 +687,23 @@ router.post("/:id/generate-summary", async (req, res, next) => {
       return res.status(403).json({ error: "Only the project owner can generate a summary" });
     }
 
-    let summaryResult;
-    try {
-      summaryResult = await generateProjectSummary({
-        name: project.name,
-        category: project.category,
-        description: project.description,
-      });
-    } catch (err) {
-      if (err.code === "MISSING_API_KEY") {
-        return res.status(503).json({ error: "AI summary feature is not configured on this server" });
-      }
-      // Surface upstream Anthropic errors with their HTTP status when available
-      // so the client can distinguish 429 (rate-limited) from 5xx (retry later).
-      const status = err.status && Number.isInteger(err.status) ? err.status : 502;
-      return res.status(status).json({ error: err.message || "Failed to generate summary" });
-    }
-
-    const sourceHash = crypto
-      .createHash("sha256")
-      .update(project.description || "")
-      .digest("hex");
-
-    const updated = await pool.query(
-      `UPDATE projects
-          SET ai_summary              = $1,
-              ai_summary_generated_at = NOW(),
-              ai_summary_model        = $2,
-              ai_summary_source_hash  = $3,
-              updated_at              = NOW()
-        WHERE id = $4
-        RETURNING ai_summary, ai_summary_generated_at, ai_summary_model, ai_summary_source_hash`,
-      [summaryResult.summary, summaryResult.model, sourceHash, req.params.id],
-    );
-
-    const row = updated.rows[0];
-    res.json({
-      success: true,
-      data: {
-        aiSummary:            row.ai_summary,
-        aiSummaryGeneratedAt: new Date(row.ai_summary_generated_at).toISOString(),
-        aiSummaryModel:       row.ai_summary_model,
-        aiSummarySourceHash:  row.ai_summary_source_hash,
-      },
+    await enqueueAISummary(req.params.id, {
+      name: project.name,
+      category: project.category,
+      description: project.description,
+      adminAddress,
     });
+
+    logAdminAction({
+      actor: adminAddress,
+      action: "project.summary.enqueued",
+      targetType: "project",
+      targetId: req.params.id,
+      metadata: {},
+      ipAddress: req.ip,
+    });
+
+    res.status(202).json({ success: true, data: { status: "queued" } });
   } catch (e) {
     next(e);
   }
@@ -625,6 +740,15 @@ router.post("/:id/matching", async (req, res, next) => {
        RETURNING id, project_id, matcher_address, cap_xlm, multiplier, matched_xlm, expires_at, created_at`,
       [uuid(), req.params.id, matcherAddress, Number.parseFloat(capXLM).toFixed(7), multiplier, new Date(expiresAt).toISOString()],
     );
+
+    logAdminAction({
+      actor: matcherAddress,
+      action: "project.matching.create",
+      targetType: "donation_match",
+      targetId: result.rows[0].id,
+      metadata: { projectId: req.params.id, capXLM, multiplier, expiresAt },
+      ipAddress: req.ip,
+    });
 
     const row = result.rows[0];
     res.status(201).json({
@@ -700,6 +824,17 @@ router.patch("/:id/status", async (req, res, next) => {
        RETURNING *`,
       [status, reason || null, req.params.id],
     );
+
+    logAdminAction({
+      actor: adminAddress || "unknown",
+      action: `project.status.${status}`,
+      targetType: "project",
+      targetId: req.params.id,
+      metadata: { previousStatus: projectResult.rows[0].status, reason },
+      ipAddress: req.ip,
+    });
+
+    await redis.deletePattern(PROJECTS_LIST_CACHE_PREFIX + "*");
 
     res.json({ success: true, data: mapProjectRow(result.rows[0]) });
   } catch (e) {

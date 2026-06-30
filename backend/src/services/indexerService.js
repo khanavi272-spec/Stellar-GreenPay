@@ -7,6 +7,7 @@ const { server: stellarServer } = require("./stellar");
 const pool = require("../db/pool");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
+const logger = require("../logger");
 
 let lastProcessedLedger = 0;
 let isRunning = false;
@@ -23,11 +24,18 @@ async function updateProjectWallets() {
     for (const row of result.rows) {
       projectWallets.set(row.wallet_address, row.id);
     }
-    console.log(`[Indexer] Updated cache with ${projectWallets.size} project wallets.`);
+    logger.debug({ event: "indexer_wallets_refreshed", count: projectWallets.size }, "Project wallet cache updated");
   } catch (err) {
-    console.error("[Indexer] Failed to update project wallets cache:", err.message);
+    logger.error({ event: "indexer_wallets_refresh_error", err }, err.message);
   }
 }
+
+/**
+ * Refresh the in-memory cache of active project wallet addresses.
+ *
+ * @returns {Promise<void>} Resolves after the cache is updated.
+ */
+// internal helper
 
 /**
  * Start the Stellar indexer service.
@@ -42,7 +50,7 @@ async function startIndexer(socketIo) {
   // Refresh cache every 10 minutes
   setInterval(updateProjectWallets, 10 * 60 * 1000);
 
-  console.log("[Indexer] Starting Horizon operations stream...");
+  logger.info({ event: "indexer_started" }, "Starting Horizon operations stream");
 
   // Start streaming operations from 'now'
   stellarServer.operations()
@@ -60,14 +68,23 @@ async function startIndexer(socketIo) {
             }
           }
         } catch (err) {
-          console.error("[Indexer] Error processing operation:", err.message);
+          logger.error({ event: "indexer_op_error", err }, err.message);
         }
       },
       onerror: (err) => {
-        console.error("[Indexer] Stream error:", err);
+        logger.error({ event: "indexer_horizon_stream_error", err }, "Horizon stream error");
       }
     });
 }
+
+/**
+ * Start the Stellar indexer service which streams Horizon operations and
+ * processes project donations.
+ *
+ * @param {import('socket.io').Server} socketIo - Socket.io server instance used for websocket events.
+ * @returns {Promise<void>} Resolves when the indexer is started.
+ */
+// exported as `startIndexer`
 
 /**
  * Handle a payment to a project.
@@ -141,7 +158,14 @@ async function handleDonation(projectId, op) {
     await client.query("COMMIT");
     inTransaction = false;
 
-    console.log(`[Indexer] New donation: ${amountXLM} XLM from ${donorAddress} to project ${projectId}`);
+    logger.info({
+      event: "indexer_donation_recorded",
+      amount: amountXLM,
+      currency: "XLM",
+      project: projectId,
+      donor: donorAddress,
+      txHash,
+    }, "Indexer donation recorded");
 
     // 5. Emit WebSocket event
     if (io) {
@@ -155,11 +179,20 @@ async function handleDonation(projectId, op) {
     }
   } catch (err) {
     if (inTransaction) await client.query("ROLLBACK");
-    console.error("[Indexer] Failed to process donation:", err.message);
+    logger.error({ event: "indexer_donation_error", project: projectId, txHash, err }, err.message);
   } finally {
     client.release();
   }
 }
+
+/**
+ * Handle a Horizon payment operation observed for a project wallet.
+ *
+ * @param {string} projectId - Internal project UUID.
+ * @param {object} op - Horizon operation object for the payment.
+ * @returns {Promise<void>} Resolves once processing (DB updates, profiles) completes.
+ */
+// internal helper
 
 /**
  * Returns the indexer status for the health endpoint.
@@ -172,6 +205,13 @@ function getStatus() {
     timestamp: new Date().toISOString()
   };
 }
+
+/**
+ * Get the current indexer status used by the health endpoint.
+ *
+ * @returns {{isRunning:boolean,lastProcessedLedger:number,projectWalletsCount:number,timestamp:string}}
+ */
+// exported as `getStatus`
 
 module.exports = {
   startIndexer,

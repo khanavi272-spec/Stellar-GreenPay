@@ -12,7 +12,11 @@
     <header class="glass-panel">
       <div class="header-top">
         <h1 class="logo">🌿 GreenPay</h1>
-        <button id="connect-btn" class="btn glow-btn">Connect Wallet</button>
+        <div class="header-actions">
+          <span id="network-badge" class="network-badge network-badge-testnet">Testnet</span>
+          <button id="connect-btn" class="btn glow-btn">Connect Wallet</button>
+          <button id="settings-btn" class="btn settings-icon-btn" title="Settings" aria-label="Open settings">⚙️</button>
+        </div>
       </div>
       <div id="wallet-info" class="wallet-info hidden">
         <div class="address-badge">
@@ -29,6 +33,20 @@
         <h3>Top Saved Projects</h3>
         <span class="badge">3</span>
       </div>
+
+      <!-- Project Search -->
+      <div class="search-wrapper" id="search-wrapper">
+        <span class="search-icon">🔍</span>
+        <input
+          type="text"
+          id="project-search"
+          class="search-input"
+          placeholder="Search projects…"
+          autocomplete="off"
+        />
+        <ul id="search-dropdown" class="search-dropdown hidden"></ul>
+      </div>
+
       <ul id="project-list" class="project-list">
         <!-- Skeleton Loader -->
         <li class="glass-panel project-item skeleton">

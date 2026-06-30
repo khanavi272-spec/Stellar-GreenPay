@@ -121,11 +121,21 @@ CREATE TABLE IF NOT EXISTS donation_matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Tracks wallets that follow a project (used for Follow button state and
--- follower counts). A follow is uniquely scoped to (project_id, wallet_address).
+
+CREATE TABLE IF NOT EXISTS device_tokens (
+  id UUID PRIMARY KEY,
+  token TEXT NOT NULL UNIQUE,
+  platform TEXT NOT NULL,
+  wallet_address TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS project_follows (
-  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  wallet_address TEXT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (project_id, wallet_address)
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  device_token_id UUID NOT NULL REFERENCES device_tokens(id) ON DELETE CASCADE,
+  wallet_address TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(project_id, device_token_id)
 );

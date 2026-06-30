@@ -27,7 +27,7 @@ mod fuzz_tests;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    token, Address, Env, symbol_short, String,
+    token, Address, Env, symbol_short, Symbol, String, BytesN, Vec,
 };
 
 // ─── Badge tiers (on-chain) ───────────────────────────────────────────────────
@@ -65,6 +65,7 @@ pub struct DonationRecord {
     pub amount:       i128,
     pub ledger:       u32,
     pub message_hash: u32,
+    pub currency:     Symbol,  // "XLM" or "USDC"
 }
 
 #[contracttype]
@@ -100,6 +101,7 @@ pub struct VoteProposal {
 pub enum DataKey {
     Admin,
     Project(String),
+    ProjectIds,
     ProjectCount,
     DonorStats(Address),
     ImpactNFT(Address, BadgeTier),
@@ -112,6 +114,9 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    // Contract upgrade and multi-currency support
+    ContractWasmHash,
+    USDCTokenAddress,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -127,6 +132,10 @@ const VOTING_WINDOW_LEDGERS: u32 = 120_960;
 // pressure and prevents proposals from sitting open indefinitely.
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720;     // 1 hour @ 5s/ledger
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
+
+// Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
+// panics and misleading impact figures from misconfigured projects.
+const MAX_CO2_PER_XLM: u32 = 100_000;
 
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
@@ -175,12 +184,20 @@ impl GreenPayContract {
         if env.storage().instance().has(&DataKey::Project(project_id.clone())) {
             panic!("Project already registered");
         }
+        if co2_per_xlm > MAX_CO2_PER_XLM {
+            panic!("CO2 per XLM exceeds maximum");
+        }
         let project = Project {
             id: project_id.clone(), name, wallet, co2_per_xlm,
             total_raised: 0, donor_count: 0, active: true,
             registered_at: env.ledger().sequence(),
         };
         env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+        let mut project_ids: Vec<String> = env.storage().instance()
+            .get(&DataKey::ProjectIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        project_ids.push_back(project_id.clone());
+        env.storage().instance().set(&DataKey::ProjectIds, &project_ids);
         let count: u32 = env.storage().instance().get(&DataKey::ProjectCount).unwrap_or(0);
         let next_count = count.checked_add(1).expect("ProjectCount overflow");
         env.storage().instance().set(&DataKey::ProjectCount, &next_count);
@@ -196,6 +213,27 @@ impl GreenPayContract {
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         project.active = false;
         env.storage().instance().set(&DataKey::Project(project_id), &project);
+    }
+
+    /// Emergency circuit breaker — deactivates every registered project at once.
+    /// Callable only by admin when a critical vulnerability requires halting
+    /// all donation processing.
+    pub fn deactivate_all_projects(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can deactivate all projects"); }
+        let project_ids: Vec<String> = env.storage().instance()
+            .get(&DataKey::ProjectIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        for i in 0..project_ids.len() {
+            let project_id = project_ids.get(i).unwrap();
+            let mut project: Project = env.storage().instance()
+                .get(&DataKey::Project(project_id.clone())).expect("Project not found");
+            project.active = false;
+            env.storage().instance().set(&DataKey::Project(project_id), &project);
+        }
+        env.events().publish((symbol_short!("deact_all"),), admin);
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -468,10 +506,155 @@ impl GreenPayContract {
         env.storage().instance().set(&DataKey::Proposal(project_id), &proposal);
     }
 
+    /// Admin-only immediate veto. Marks the proposal resolved & rejected.
+    /// Required for incident response when a proposal is based on fraudulent data.
+    /// Emits prop_veto with the admin address for auditability.
+    pub fn veto_proposal(env: Env, admin: Address, project_id: String) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can veto proposals"); }
+        let mut proposal: VoteProposal = env.storage().instance()
+            .get(&DataKey::Proposal(project_id.clone())).expect("Proposal not found");
+        if proposal.resolved { panic!("Proposal already resolved"); }
+        proposal.resolved = true;
+        env.events().publish((symbol_short!("prop_veto"), admin), project_id.clone());
+        env.storage().instance().set(&DataKey::Proposal(project_id), &proposal);
+    }
+
     /// Returns current vote counts and status for a proposal.
     pub fn get_proposal(env: Env, project_id: String) -> VoteProposal {
         env.storage().instance()
             .get(&DataKey::Proposal(project_id)).expect("Proposal not found")
+    }
+
+    /// Donate USDC. Converts to XLM-equivalent for global stats using a price oracle stub.
+    pub fn donate_usdc(
+        env:        Env,
+        usdc_token: Address,
+        donor:      Address,
+        project_id: String,
+        usdc_amount: i128,
+        msg_hash:   u32,
+    ) {
+        donor.require_auth();
+        if usdc_amount <= 0 { panic!("Donation amount must be positive"); }
+
+        let stored_usdc: Option<Address> = env.storage().instance()
+            .get(&DataKey::USDCTokenAddress);
+        if stored_usdc.is_none() || stored_usdc.unwrap() != usdc_token {
+            panic!("USDC token not configured");
+        }
+
+        // Simple price stub: assume 1 USDC ≈ 8 XLM for now
+        // In production, this would call a real price oracle
+        let xlm_equivalent = usdc_amount
+            .checked_mul(8).expect("USDC to XLM conversion overflow");
+
+        let mut project: Project = env.storage().instance()
+            .get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Project is not accepting donations"); }
+
+        // Pre-compute CO2 increment using XLM-equivalent
+        let xlm_units = xlm_equivalent / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        let mut donor_stats: DonorStats = env.storage().instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats { total_donated: 0, donation_count: 0,
+                badge: BadgeTier::None, co2_offset_grams: 0 });
+        let prev_badge = donor_stats.badge.clone();
+
+        // Update project and donor stats using XLM-equivalent
+        project.total_raised = project.total_raised
+            .checked_add(xlm_equivalent).expect("Project total_raised overflow");
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project.donor_count
+                .checked_add(1).expect("Project donor_count overflow");
+        }
+        env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+
+        donor_stats.total_donated = donor_stats.total_donated
+            .checked_add(xlm_equivalent).expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats.donation_count
+            .checked_add(1).expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats.co2_offset_grams
+            .checked_add(co2_increment).expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage().instance().set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                env.events().publish((symbol_short!("nft_mint"), donor.clone()), donor_stats.badge.clone());
+            }
+        }
+
+        let dc: u32 = env.storage().instance().get(&DataKey::DonationCount).unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage().instance().set(&DataKey::DonationCount, &new_dc);
+
+        let gr: i128 = env.storage().instance().get(&DataKey::GlobalTotalRaised).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalTotalRaised,
+            &gr.checked_add(xlm_equivalent).expect("GlobalTotalRaised overflow"));
+
+        let gg: i128 = env.storage().instance().get(&DataKey::GlobalCO2OffsetGrams).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalCO2OffsetGrams,
+            &gg.checked_add(co2_increment).expect("GlobalCO2OffsetGrams overflow"));
+
+        let token_client = token::Client::new(&env, &usdc_token);
+        let project_wallet = project.wallet;
+        token_client.transfer(&donor, &project_wallet, &usdc_amount);
+
+        env.events().publish((symbol_short!("donated"), donor.clone(), project_id), (usdc_amount, symbol_short!("USDC")));
+    }
+
+    /// Admin-only: Set the USDC token address for multi-currency donations.
+    pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can set USDC token"); }
+        env.storage().instance().set(&DataKey::USDCTokenAddress, &usdc_token);
+        env.events().publish((symbol_short!("usdc_set"),), usdc_token);
+    }
+
+    /// Get the configured USDC token address.
+    pub fn get_usdc_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::USDCTokenAddress)
+    }
+
+    /// Admin-only: Upgrade the contract to a new WASM code.
+    /// Preserves all on-chain state while replacing the contract implementation.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can upgrade"); }
+
+        // Store the new WASM hash for upgrade verification
+        env.storage().instance().set(&DataKey::ContractWasmHash, &new_wasm_hash);
+
+        // Execute the actual upgrade
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.events().publish((symbol_short!("upgrade"),), admin);
+    }
+
+    /// Get the current contract WASM hash.
+    pub fn get_contract_wasm_hash(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::ContractWasmHash)
     }
 }
 
@@ -481,6 +664,7 @@ impl GreenPayContract {
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env, String};
+    use soroban_sdk::token::StellarAssetClient;
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 
@@ -568,6 +752,89 @@ mod tests {
     fn extend_ttl(env: &Env, cid: &soroban_sdk::Address) {
         env.as_contract(cid, || {
             env.storage().instance().extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+        });
+    }
+
+    #[test]
+    fn test_upgrade_preserves_donation_state_and_storage_keys() {
+        let (env, cid, client_v1, _admin, pid) = setup();
+        let donor       = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token       = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let amount       = 25 * STROOP;
+        let expected_co2 = 25 * 100i128;
+
+        token_client.mint(&donor, &amount);
+        client_v1.donate(&token, &donor, &pid, &amount, &42u32);
+
+        let project_before = client_v1.get_project(&pid);
+        assert_eq!(project_before.total_raised, amount);
+        assert_eq!(project_before.donor_count, 1);
+        assert_eq!(client_v1.get_donation_count(), 1);
+        assert_eq!(client_v1.get_global_total(), amount);
+        assert_eq!(client_v1.get_global_co2(), expected_co2);
+
+        // The test host replaces the executable at the same contract address,
+        // modeling a v2 deployment with the same storage key definitions.
+        let v2_cid = env.register_contract(Some(&cid), GreenPayContract);
+        assert_eq!(v2_cid, cid);
+
+        let client_v2 = GreenPayContractClient::new(&env, &cid);
+        let project_after = client_v2.get_project(&pid);
+        assert_eq!(project_after.id,            project_before.id);
+        assert_eq!(project_after.name,          project_before.name);
+        assert_eq!(project_after.wallet,        project_before.wallet);
+        assert_eq!(project_after.co2_per_xlm,   project_before.co2_per_xlm);
+        assert_eq!(project_after.total_raised,  amount);
+        assert_eq!(project_after.donor_count,   1);
+        assert!(project_after.active);
+        assert_eq!(project_after.registered_at, project_before.registered_at);
+
+        let donor_stats = client_v2.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated,    amount);
+        assert_eq!(donor_stats.donation_count,   1);
+        assert_eq!(donor_stats.badge,            BadgeTier::Seedling);
+        assert_eq!(donor_stats.co2_offset_grams, expected_co2);
+        assert!(client_v2.has_nft(&donor, &BadgeTier::Seedling));
+        assert_eq!(client_v2.get_project_count(),   1);
+        assert_eq!(client_v2.get_donation_count(),  1);
+        assert_eq!(client_v2.get_global_total(),    amount);
+        assert_eq!(client_v2.get_global_co2(),      expected_co2);
+
+        env.as_contract(&cid, || {
+            let stored_project: Project = env.storage().instance()
+                .get(&DataKey::Project(pid.clone()))
+                .expect("project key must remain readable after upgrade");
+            assert_eq!(stored_project.total_raised, amount);
+            assert_eq!(stored_project.donor_count,  1);
+
+            let stored_stats: DonorStats = env.storage().instance()
+                .get(&DataKey::DonorStats(donor.clone()))
+                .expect("donor stats key must remain readable after upgrade");
+            assert_eq!(stored_stats.total_donated,    amount);
+            assert_eq!(stored_stats.donation_count,   1);
+            assert_eq!(stored_stats.badge,            BadgeTier::Seedling);
+            assert_eq!(stored_stats.co2_offset_grams, expected_co2);
+
+            let has_donated: bool = env.storage().instance()
+                .get(&DataKey::HasDonated(pid.clone(), donor.clone()))
+                .expect("unique donor key must remain readable after upgrade");
+            assert!(has_donated);
+
+            let donation_count: u32 = env.storage().instance()
+                .get(&DataKey::DonationCount)
+                .expect("donation count key must remain readable after upgrade");
+            let global_total: i128 = env.storage().instance()
+                .get(&DataKey::GlobalTotalRaised)
+                .expect("global total key must remain readable after upgrade");
+            let global_co2: i128 = env.storage().instance()
+                .get(&DataKey::GlobalCO2OffsetGrams)
+                .expect("global CO2 key must remain readable after upgrade");
+
+            assert_eq!(donation_count, 1);
+            assert_eq!(global_total,   amount);
+            assert_eq!(global_co2,     expected_co2);
         });
     }
 
@@ -683,6 +950,47 @@ mod tests {
         client.resolve_proposal(&pid);
     }
 
+    #[test]
+    fn test_veto_proposal() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        extend_ttl(&env, &cid);
+        client.veto_proposal(&admin, &pid);
+        let p = client.get_proposal(&pid);
+        assert!(p.resolved);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can veto proposals")]
+    fn test_veto_proposal_non_admin_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        let imposter = Address::generate(&env);
+        client.veto_proposal(&imposter, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Proposal not found")]
+    fn test_veto_proposal_missing_fails() {
+        let env    = Env::default();
+        env.mock_all_auths();
+        let cid    = env.register_contract(None, GreenPayContract);
+        let client = GreenPayContractClient::new(&env, &cid);
+        let admin  = Address::generate(&env);
+        client.initialize(&admin);
+        client.veto_proposal(&admin, &String::from_str(&env, "nonexistent"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Proposal already resolved")]
+    fn test_veto_proposal_double_veto_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        extend_ttl(&env, &cid);
+        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&admin, &pid);
+    }
+
     // ─── Configurable voting-duration tests ───────────────────────────────────
 
     /// A non-zero `duration_ledgers` within bounds is honored verbatim.
@@ -718,5 +1026,104 @@ mod tests {
     fn test_create_proposal_rejects_too_long_duration() {
         let (_env, _cid, client, admin, pid) = setup();
         client.create_proposal(&admin, &pid, &(MAX_VOTING_WINDOW_LEDGERS + 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "CO2 per XLM exceeds maximum")]
+    fn test_register_project_rejects_excessive_co2_per_xlm() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let pid2 = String::from_str(&env, "proj-002");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Bad Project"),
+            &wallet,
+            &(MAX_CO2_PER_XLM + 1),
+        );
+    }
+
+    #[test]
+    fn test_deactivate_all_projects() {
+        let (env, _cid, client, admin, pid1) = setup();
+        let pid2 = String::from_str(&env, "proj-002");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Second Project"),
+            &wallet,
+            &100u32,
+        );
+
+        assert!(client.get_project(&pid1).active);
+        assert!(client.get_project(&pid2).active);
+
+        client.deactivate_all_projects(&admin);
+
+        assert!(!client.get_project(&pid1).active);
+        assert!(!client.get_project(&pid2).active);
+    }
+
+    /// Test that voting is rejected after the deadline has passed (issue #209).
+    #[test]
+    #[should_panic(expected = "Voting window has closed")]
+    fn test_vote_rejected_after_deadline() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+
+        // Create a voter with badge
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+
+        // Advance ledger past the deadline
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+
+        // Attempt to vote after deadline — should panic with "Voting window has closed"
+        client.vote_verify_project(&voter, &pid, &true);
+    }
+
+    /// Test that voting is allowed before the deadline (issue #209).
+    #[test]
+    fn test_vote_allowed_before_deadline() {
+        let (env, cid, client, admin, pid) = setup();
+        let start = env.ledger().sequence();
+        client.create_proposal(&admin, &pid, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+
+        // Vote at ledger start + VOTING_WINDOW_LEDGERS - 1 (last valid ledger)
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(start + VOTING_WINDOW_LEDGERS - 1);
+
+        // Should succeed
+        client.vote_verify_project(&voter, &pid, &true);
+
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.votes_for, 1);
+    }
+
+    /// Test minimum voting duration enforcement (issue #209).
+    #[test]
+    fn test_minimum_voting_duration_enforced() {
+        let (env, cid, client, admin, pid) = setup();
+        let custom_duration = MIN_VOTING_WINDOW_LEDGERS;
+        let start = env.ledger().sequence();
+
+        client.create_proposal(&admin, &pid, &custom_duration);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+
+        // Vote within the minimum window
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(start + custom_duration - 1);
+
+        client.vote_verify_project(&voter, &pid, &true);
+
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.votes_for, 1);
     }
 }

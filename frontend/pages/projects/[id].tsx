@@ -3,6 +3,8 @@
  */
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
+import Head from "next/head";
+import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
@@ -27,11 +29,19 @@ import { useWishlist } from "@/hooks/useWishlist";
 interface ProjectDetailProps {
   publicKey: string | null;
   onConnect: (pk: string) => void;
+  ogProject?: {
+    name: string;
+    description: string;
+    imageUrl?: string;
+    category: string;
+    location: string;
+  } | null;
 }
 
 export default function ProjectDetail({
   publicKey,
   onConnect,
+  ogProject,
 }: ProjectDetailProps) {
   const router = useRouter();
   const { id } = router.query;
@@ -695,8 +705,29 @@ export default function ProjectDetail({
   else if (treesEquivalent < 50) analogy = "A growing mini-forest! 🌲";
   else analogy = "A massive impact for our planet! 🌍";
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-greenpay.app";
+  const ogTitle = ogProject ? `${ogProject.name} — Stellar GreenPay` : "Stellar GreenPay";
+  const ogDescription = ogProject
+    ? `${ogProject.description.slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar GreenPay.`
+    : "Donate XLM directly to verified climate projects on Stellar.";
+  const ogImage = ogProject?.imageUrl || `${appUrl}/og-default.png`;
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 pb-24 sm:pb-10 animate-fade-in">
+      <Head>
+        <title>{ogTitle}</title>
+        <meta name="description" content={ogDescription} />
+        <meta property="og:type" content="website" />
+        <meta property="og:title" content={ogTitle} />
+        <meta property="og:description" content={ogDescription} />
+        <meta property="og:image" content={ogImage} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content={ogTitle} />
+        <meta name="twitter:description" content={ogDescription} />
+        <meta name="twitter:image" content={ogImage} />
+      </Head>
       <ToastNotification
         toasts={toasts}
         onDismiss={(toastId) => setToasts((prev) => prev.filter((t) => t.id !== toastId))}
@@ -721,7 +752,7 @@ export default function ProjectDetail({
 
       <Link
         href="/projects"
-        className="inline-flex items-center gap-1 text-sm text-[#5a7a5a] hover:text-forest-700 transition-colors mb-6 font-body"
+        className="inline-flex items-center gap-1 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] hover:text-forest-700 transition-colors mb-6 font-body"
       >
         ← Back to Projects
       </Link>
@@ -841,7 +872,7 @@ export default function ProjectDetail({
                       ✓ Verified
                     </span>
                   ) : null}
-                  <span className="text-xs text-[#8aaa8a] bg-forest-50 px-2.5 py-1 rounded-full border border-forest-100 font-body">
+                  <span className="text-xs text-[#8aaa8a] dark:text-forest-300 bg-forest-50 px-2.5 py-1 rounded-full border border-forest-100 font-body">
                     {project.category}
                   </span>
                   <button
@@ -902,14 +933,14 @@ export default function ProjectDetail({
                   {project.name}
                 </h1>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
-                  <p className="text-[#5a7a5a] text-sm font-body">
+                  <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body">
                     📍 {project.location}
                   </p>
                   {(project.averageRating || 0) > 0 && (
                     <div className="flex items-center gap-1">
                       <span className="text-amber-400 text-sm">★</span>
                       <span className="text-forest-900 text-sm font-bold">{project.averageRating?.toFixed(1)}</span>
-                      <span className="text-[#8aaa8a] text-xs">({project.ratingCount} reviews)</span>
+                      <span className="text-[#8aaa8a] dark:text-forest-300 text-xs">({project.ratingCount} reviews)</span>
                     </div>
                   )}
                 </div>
@@ -927,7 +958,7 @@ export default function ProjectDetail({
                   <CircularProgress percentage={pct} size={64} strokeWidth={6} />
                   <div className="flex-1">
                     <p className="font-semibold text-forest-800 text-lg">{formatXLM(project.raisedXLM)} raised</p>
-                    <p className="text-[#5a7a5a] text-sm font-body mt-0.5">towards {formatXLM(project.goalXLM)} goal</p>
+                    <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body mt-0.5">towards {formatXLM(project.goalXLM)} goal</p>
                   </div>
                 </div>
               )}
@@ -974,19 +1005,19 @@ export default function ProjectDetail({
                           ℹ️
                         </button>
                         <span className="tooltip-text" role="tooltip">
-                          Estimated CO₂ offset based on this project's declared
+                          Estimated CO₂ offset based on this project&apos;s declared
                           impact rate per XLM donated. Actual results may vary.
                         </span>
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-[#8aaa8a] font-body">{s.label}</p>
+                  <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">{s.label}</p>
                 </div>
               ))}
             </div>
 
             {/* Wallet link */}
-            <div className="mt-4 pt-4 border-t border-forest-100 flex items-center gap-2 text-xs text-[#8aaa8a] font-body">
+            <div className="mt-4 pt-4 border-t border-forest-100 flex items-center gap-2 text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
               <span>Project wallet:</span>
               <a
                 href={accountUrl(project.walletAddress)}
@@ -1038,7 +1069,7 @@ export default function ProjectDetail({
                   </span>
                 ) : (
                   <svg
-                    className="w-4 h-4 text-[#8aaa8a] hover:text-forest-700"
+                    className="w-4 h-4 text-[#8aaa8a] dark:text-forest-300 hover:text-forest-700"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -1103,7 +1134,7 @@ export default function ProjectDetail({
                   {project.aiSummary}
                 </p>
               ) : (
-                <p className="text-sm text-[#5a7a5a] italic font-body">
+                <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] italic font-body">
                   No AI summary yet. Click &ldquo;Generate summary&rdquo; to create one for donors.
                 </p>
               )}
@@ -1203,7 +1234,7 @@ export default function ProjectDetail({
                         Completed
                       </span>
                     </div>
-                    <p className="text-xs text-[#5a7a5a] font-body mb-2">
+                    <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] font-body mb-2">
                       Ended {new Date(campaign.deadline).toLocaleDateString()}
                     </p>
                     <div className="flex justify-between text-xs mb-1 font-body">
@@ -1231,7 +1262,7 @@ export default function ProjectDetail({
             <h2 className="font-display text-lg font-semibold text-forest-900 mb-2">
               Campaign Creator
             </h2>
-            <p className="text-xs text-[#5a7a5a] font-body mb-4">
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] font-body mb-4">
               Project admins can launch a time-limited campaign with a custom
               goal and deadline.
             </p>
@@ -1268,6 +1299,7 @@ export default function ProjectDetail({
                 <input
                   type="datetime-local"
                   required
+                  aria-label="Campaign deadline"
                   value={campaignForm.deadline}
                   onChange={(e) =>
                     setCampaignForm((prev) => ({
@@ -1314,7 +1346,7 @@ export default function ProjectDetail({
               {t("project.projectUpdates")}
             </h2>
             {updates.length === 0 ? (
-              <p className="text-sm text-[#5a7a5a] font-body">{t("project.noUpdatesYet")}</p>
+              <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">{t("project.noUpdatesYet")}</p>
             ) : (
               <div className="space-y-4">
                 {updates.map((u) => {
@@ -1328,12 +1360,12 @@ export default function ProjectDetail({
                         <h3 className="font-semibold text-forest-900 text-sm font-body">
                           {u.title}
                         </h3>
-                        <span className="text-xs text-[#8aaa8a] font-body">
+                        <span className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
                           {timeAgo(u.createdAt)}
                         </span>
                       </div>
                       <div
-                        className="text-[#5a7a5a] text-sm leading-relaxed font-body prose prose-sm max-w-none"
+                        className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm leading-relaxed font-body prose prose-sm max-w-none"
                         dangerouslySetInnerHTML={{ __html: renderMarkdown(u.body) }}
                       />
                       <div className="flex items-center gap-3 mt-2">
@@ -1343,7 +1375,7 @@ export default function ProjectDetail({
                           className={`flex items-center gap-1.5 text-xs font-body transition-colors ${
                             like?.liked
                               ? "text-red-500 font-semibold"
-                              : "text-[#8aaa8a] hover:text-red-400"
+                              : "text-[#8aaa8a] dark:text-forest-300 hover:text-red-400"
                           } disabled:opacity-50`}
                         >
                           <span>{like?.liked ? "❤️" : "🤍"}</span>
@@ -1386,16 +1418,16 @@ export default function ProjectDetail({
               <h2 className="font-display text-lg font-semibold text-forest-900">
                 Donor Discussion
               </h2>
-              <span className="text-xs text-[#8aaa8a] font-body">On-chain memos</span>
+              <span className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">On-chain memos</span>
             </div>
-            <p className="text-xs text-[#5a7a5a] font-body mb-4">
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] font-body mb-4">
               Discuss by donating — messages are Stellar transaction memos from real donations.
             </p>
 
             {discussionLoading ? (
-              <p className="text-sm text-[#5a7a5a] font-body">Loading discussion…</p>
+              <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">Loading discussion…</p>
             ) : discussion.length === 0 ? (
-              <p className="text-sm text-[#5a7a5a] font-body">
+              <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
                 No memo messages yet. Be the first to leave a message with your donation.
               </p>
             ) : (
@@ -1406,7 +1438,7 @@ export default function ProjectDetail({
                   return (
                     <div key={m.id} className="p-3 rounded-xl border border-forest-100 bg-white">
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                        <div className="text-xs text-[#8aaa8a] font-body">
+                        <div className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
                           <a
                             href={accountUrl(m.from)}
                             target="_blank"
@@ -1459,7 +1491,7 @@ export default function ProjectDetail({
           {/* Impact Calculator */}
           <div className="card bg-forest-50 border-forest-200">
             <h3 className="font-display font-semibold text-forest-900 mb-2">Impact Calculator</h3>
-            <p className="text-xs text-[#5a7a5a] mb-3 font-body">See what your donation can achieve before you give.</p>
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">See what your donation can achieve before you give.</p>
             
             <div className="flex flex-wrap gap-2 mb-3">
               {["10", "25", "50", "100", "250"].map(p => (
@@ -1533,7 +1565,7 @@ export default function ProjectDetail({
             </div>
           ) : (
             <div>
-              <p className="text-center text-[#5a7a5a] text-sm mb-4 font-body">
+              <p className="text-center text-[#5a7a5a] dark:text-[#8aaa8a] text-sm mb-4 font-body">
                 Connect your wallet to donate
               </p>
               <WalletConnect onConnect={onConnect} />
@@ -1543,7 +1575,7 @@ export default function ProjectDetail({
           {/* Share card */}
           <div className="card text-center bg-forest-50 border-forest-200">
             <p className="font-display font-semibold text-forest-900 mb-2">Spread the word 🌍</p>
-            <p className="text-xs text-[#5a7a5a] mb-3 font-body">Share this project with friends and family to increase its impact.</p>
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">Share this project with friends and family to increase its impact.</p>
             
             <div className="grid grid-cols-3 gap-2 mb-3">
               <button
@@ -1588,8 +1620,8 @@ export default function ProjectDetail({
             <p className="font-display font-semibold text-forest-900 mb-2">
               Impact Report 📊
             </p>
-            <p className="text-xs text-[#5a7a5a] mb-3 font-body">
-              Download a print-friendly summary of this project's progress and
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
+              Download a print-friendly summary of this project&apos;s progress and
               impact.
             </p>
             <button
@@ -1605,11 +1637,11 @@ export default function ProjectDetail({
             <p className="font-display font-semibold text-forest-900 mb-1">
               Get project updates 🔔
             </p>
-            <p className="text-xs text-[#5a7a5a] mb-3 font-body">
+            <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
               Receive an email when this project posts new updates.
             </p>
             {subscriberCount !== null && (
-              <p className="text-xs text-[#8aaa8a] font-body mb-3">
+              <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body mb-3">
                 📬 {subscriberCount.toLocaleString()}{" "}
                 {subscriberCount === 1 ? "subscriber" : "subscribers"}
               </p>
@@ -1654,6 +1686,31 @@ export default function ProjectDetail({
     </div>
   );
 }
+
+export const getServerSideProps: GetServerSideProps = async (context) => {
+  const { id } = context.params as { id: string };
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+  try {
+    const res = await fetch(`${apiUrl}/api/projects/${encodeURIComponent(id)}`);
+    if (!res.ok) return { props: { ogProject: null } };
+    const body = await res.json();
+    const p = body.data;
+    return {
+      props: {
+        ogProject: {
+          name: p.name ?? "",
+          description: p.description ?? "",
+          imageUrl: p.imageUrl ?? null,
+          category: p.category ?? "",
+          location: p.location ?? "",
+        },
+      },
+    };
+  } catch {
+    return { props: { ogProject: null } };
+  }
+};
 
 /** Simple markdown-to-HTML: bold, italic, links, line breaks. */
 function renderMarkdown(text: string): string {
