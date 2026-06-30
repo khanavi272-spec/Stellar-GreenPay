@@ -2,12 +2,26 @@
 
 Every donation, badge milestone, governance action, and admin operation
 emits a structured Soroban contract event.  This document catalogs all
-10 events emitted by the GreenPay contract.
+11 events emitted by the GreenPay contract.
 
 Events are published via `env.events().publish(topics, data)`.  The
 first element of the **topics** tuple is always a 4-7 byte `Symbol`
 that identifies the event name.  Both **topics** and **data** are
 `Vec<SCVal>` in the Soroban XDR encoding.
+
+| # | Event | Topics | Data | Lines |
+|---|-------|--------|------|-------|
+| 1 | `proj_reg` | `(Symbol, Address)` | `String` | 191 |
+| 2 | `donated` (XLM) | `(Symbol, Address, String)` | `(i128, BadgeTier, u32)` | 288 |
+| 3 | `donated` (USDC) | `(Symbol, Address, String)` | `(i128, Symbol)` | 570 |
+| 4 | `nft_mint` | `(Symbol, Address)` | `BadgeTier` | 268, 363, 550 |
+| 5 | `prop_new` | `(Symbol, Address)` | `(String, u32)` | 418 |
+| 6 | `voted` | `(Symbol, Address, String)` | `bool` | 454 |
+| 7 | `proj_ver` | `(Symbol,)` | `String` | 468 |
+| 8 | `prop_rej` | `(Symbol,)` | `String` | 470 |
+| 9 | `prop_veto` | `(Symbol, Address)` | `String` | 474 |
+| 10 | `usdc_set` | `(Symbol,)` | `Address` | 580 |
+| 11 | `upgrade` | `(Symbol,)` | `Address` | 602 |
 
 ---
 
@@ -212,7 +226,31 @@ const projectId = event.data().str();
 
 ---
 
-## 9. `usdc_set` — USDC Token Configured
+## 9. `prop_veto` — Proposal Vetoed by Admin
+
+| Field | Value |
+|-------|-------|
+| **Emitted in** | `veto_proposal()` (line 474) |
+| **Topics** | `[Symbol("prop_veto"), Address(admin)]` |
+| **Data** | `String(project_id)` |
+
+**When emitted:** An admin immediately vetoes (rejects) a proposal
+before the voting window closes.  This is an incident-response action
+for proposals based on fraudulent project data.  The `admin` address
+in the topics provides an audit trail.
+
+**Decoding:**
+```js
+const topic = event.topic();
+const eventName = topic[0].sym();       // "prop_veto"
+const admin     = topic[1].address();   // G…
+
+const projectId = event.data().str();
+```
+
+---
+
+## 10. `usdc_set` — USDC Token Configured
 
 | Field | Value |
 |-------|-------|
@@ -233,7 +271,7 @@ const usdcToken = event.data().address();  // C…
 
 ---
 
-## 10. `upgrade` — Contract Upgraded
+## 11. `upgrade` — Contract Upgraded
 
 | Field | Value |
 |-------|-------|

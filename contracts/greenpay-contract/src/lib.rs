@@ -472,6 +472,22 @@ impl GreenPayContract {
         env.storage().instance().set(&DataKey::Proposal(project_id), &proposal);
     }
 
+    /// Admin-only immediate veto. Marks the proposal resolved & rejected.
+    /// Required for incident response when a proposal is based on fraudulent data.
+    /// Emits prop_veto with the admin address for auditability.
+    pub fn veto_proposal(env: Env, admin: Address, project_id: String) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin).expect("Not initialized");
+        if stored_admin != admin { panic!("Only admin can veto proposals"); }
+        let mut proposal: VoteProposal = env.storage().instance()
+            .get(&DataKey::Proposal(project_id.clone())).expect("Proposal not found");
+        if proposal.resolved { panic!("Proposal already resolved"); }
+        proposal.resolved = true;
+        env.events().publish((symbol_short!("prop_veto"), admin), project_id.clone());
+        env.storage().instance().set(&DataKey::Proposal(project_id), &proposal);
+    }
+
     /// Returns current vote counts and status for a proposal.
     pub fn get_proposal(env: Env, project_id: String) -> VoteProposal {
         env.storage().instance()
@@ -898,6 +914,47 @@ mod tests {
         // Extend again so the second call reaches our panic, not an archive error
         extend_ttl(&env, &cid);
         client.resolve_proposal(&pid);
+    }
+
+    #[test]
+    fn test_veto_proposal() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        extend_ttl(&env, &cid);
+        client.veto_proposal(&admin, &pid);
+        let p = client.get_proposal(&pid);
+        assert!(p.resolved);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can veto proposals")]
+    fn test_veto_proposal_non_admin_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        let imposter = Address::generate(&env);
+        client.veto_proposal(&imposter, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Proposal not found")]
+    fn test_veto_proposal_missing_fails() {
+        let env    = Env::default();
+        env.mock_all_auths();
+        let cid    = env.register_contract(None, GreenPayContract);
+        let client = GreenPayContractClient::new(&env, &cid);
+        let admin  = Address::generate(&env);
+        client.initialize(&admin);
+        client.veto_proposal(&admin, &String::from_str(&env, "nonexistent"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Proposal already resolved")]
+    fn test_veto_proposal_double_veto_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+        extend_ttl(&env, &cid);
+        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&admin, &pid);
     }
 
     // ─── Configurable voting-duration tests ───────────────────────────────────
