@@ -31,6 +31,7 @@ const VALID_CATEGORIES = [
   "Sustainable Agriculture",
   "Other",
 ];
+const STELLAR_PUBLIC_KEY_RE = /^G[A-Z0-9]{55}$/;
 
 const createProjectSchema = z.object({
   name: sanitizedStringField({ required: true, minLength: 3, maxLength: 120, message: "must not contain HTML" }),
@@ -471,7 +472,12 @@ router.post("/admin/register", async (req, res) => {
     const { projectId, name, wallet, co2PerXLM, adminAddress } = req.body;
     
     if (!CONTRACT_ID) throw new Error("CONTRACT_ID not configured");
-    if (!adminAddress) throw new Error("adminAddress is required");
+    if (!adminAddress) {
+      return res.status(400).json({ error: "adminAddress is required" });
+    }
+    if (typeof adminAddress !== "string" || !STELLAR_PUBLIC_KEY_RE.test(adminAddress)) {
+      return res.status(400).json({ error: "Invalid Stellar public key" });
+    }
 
     const contract = new Contract(CONTRACT_ID);
     const sourceAccount = await server.loadAccount(adminAddress);
